@@ -40,10 +40,3 @@ app.post("/generate", async (req, res) => {
 const PORT = process.env.PORT || 7070;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
-
-git init
-git add .
-git commit -m "first commit"
-git branch -M main
-git remote add origin https://github.com/Xoli-Nxiweni/ChatBotAPI.git
-git push -u origin main
