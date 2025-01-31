@@ -37,6 +37,10 @@ app.post("/generate", async (req, res) => {
     }
 });
 
+app.get("/", (req, res) => {
+    res.send("Welcome to the Google Generative AI API");
+})
+
 const PORT = process.env.PORT || 7070;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
