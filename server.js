@@ -9,10 +9,18 @@ import path from "path";
 import { fileURLToPath } from 'url';
 
 // Import file parsing libraries with proper error handling
+let pdfPoppler;
 let mammoth; // For DOCX files
-let pdfParse; // PDF parser - Linux compatible
+let pdfParse; // Alternative PDF parser
 
-// Try to load PDF parsing library (pdf-parse only - Linux compatible)
+// Try to load PDF parsing libraries
+try {
+    pdfPoppler = (await import("pdf-poppler")).default;
+    console.log("✓ pdf-poppler loaded successfully");
+} catch (error) {
+    console.log("⚠️ pdf-poppler not available:", error.message);
+}
+
 try {
     pdfParse = (await import("pdf-parse")).default;
     console.log("✓ pdf-parse loaded successfully");
@@ -20,7 +28,6 @@ try {
     console.log("⚠️ pdf-parse not available:", error.message);
 }
 
-// Try to load mammoth for DOCX files
 try {
     mammoth = (await import("mammoth")).default;
     console.log("✓ mammoth (DOCX parser) loaded successfully");
@@ -88,30 +95,83 @@ const SUPPORTED_EXTENSIONS = {
     '.ppt': 'parsePPT'
 };
 
-// Enhanced PDF parsing using only pdf-parse (Linux compatible)
+// Enhanced PDF parsing with multiple fallback methods
 async function parsePDF(filePath) {
     console.log(`Attempting to parse PDF: ${filePath}`);
     
-    if (!pdfParse) {
-        throw new Error("PDF parsing not available - pdf-parse library not loaded");
+    // Method 1: Try pdf-parse first (usually more reliable)
+    if (pdfParse) {
+        try {
+            console.log("Trying pdf-parse...");
+            const dataBuffer = fs.readFileSync(filePath);
+            const data = await pdfParse(dataBuffer);
+            if (data.text && data.text.trim().length > 0) {
+                console.log(`✓ pdf-parse successful: ${data.text.length} characters`);
+                return { text: data.text.trim(), method: 'pdf-parse' };
+            }
+        } catch (error) {
+            console.log(`pdf-parse failed: ${error.message}`);
+        }
     }
     
-    try {
-        console.log("Parsing PDF with pdf-parse...");
-        const dataBuffer = fs.readFileSync(filePath);
-        const data = await pdfParse(dataBuffer);
-        
-        if (data.text && data.text.trim().length > 0) {
-            console.log(`✓ PDF parsed successfully: ${data.text.length} characters`);
-            return { text: data.text.trim(), method: 'pdf-parse' };
-        } else {
-            throw new Error("No text content found in PDF - file might be image-based or corrupted");
+    // Method 2: Try pdf-poppler as fallback
+    if (pdfPoppler) {
+        try {
+            console.log("Trying pdf-poppler...");
+            const outputDir = path.join(path.dirname(filePath), 'temp_pdf_output');
+            
+            // Create temp directory if it doesn't exist
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
+            }
+            
+            const options = {
+                format: 'text',
+                out_dir: outputDir,
+                out_prefix: 'converted',
+                page: null
+            };
+            
+            await pdfPoppler.convert(filePath, options);
+            
+            let combinedText = '';
+            const files = fs.readdirSync(outputDir);
+            const textFiles = files.filter(file => file.startsWith('converted-') && file.endsWith('.txt'))
+                                   .sort((a, b) => {
+                                       const numA = parseInt(a.match(/converted-(\d+)\.txt/)?.[1] || '0');
+                                       const numB = parseInt(b.match(/converted-(\d+)\.txt/)?.[1] || '0');
+                                       return numA - numB;
+                                   });
+            
+            for (const textFile of textFiles) {
+                const textFilePath = path.join(outputDir, textFile);
+                if (fs.existsSync(textFilePath)) {
+                    const pageText = fs.readFileSync(textFilePath, 'utf8');
+                    combinedText += pageText + '\n\n';
+                }
+            }
+            
+            // Clean up temporary files
+            try {
+                for (const file of files) {
+                    fs.unlinkSync(path.join(outputDir, file));
+                }
+                fs.rmdirSync(outputDir);
+            } catch (cleanupError) {
+                console.warn("Warning: Could not clean up temporary files:", cleanupError.message);
+            }
+            
+            if (combinedText.trim().length > 0) {
+                console.log(`✓ pdf-poppler successful: ${combinedText.length} characters`);
+                return { text: combinedText.trim(), method: 'pdf-poppler' };
+            }
+            
+        } catch (error) {
+            console.log(`pdf-poppler failed: ${error.message}`);
         }
-        
-    } catch (error) {
-        console.error(`PDF parsing error: ${error.message}`);
-        throw new Error(`PDF parsing failed: ${error.message}`);
     }
+    
+    throw new Error("All PDF parsing methods failed - file might be image-based, encrypted, or corrupted");
 }
 
 // Parse DOCX files using mammoth
@@ -133,6 +193,7 @@ async function parseDOCX(filePath) {
 
 // Parse DOC files (older format) - basic text extraction
 async function parseDOC(filePath) {
+    // DOC files are more complex, for now we'll treat them as binary and extract what we can
     try {
         console.log(`Attempting to parse DOC: ${filePath}`);
         const buffer = fs.readFileSync(filePath);
@@ -164,7 +225,7 @@ async function parseTXT(filePath) {
     }
 }
 
-// Parse PowerPoint files (placeholder - would need additional libraries for full support)
+// Parse PowerPoint files (basic - would need additional libraries for full support)
 async function parsePPTX(filePath) {
     console.log(`⚠️ PPTX parsing not fully implemented yet: ${filePath}`);
     return { text: `[PowerPoint file detected: ${path.basename(filePath)} - content extraction not yet implemented]`, method: 'placeholder' };
@@ -295,7 +356,6 @@ app.post("/generate", async (req, res) => {
             return res.status(400).json({ error: "Prompt is required" });
         }
 
-        // Improved: Only inject file context if prompt is clearly about the document, or forceContext is true
         const contextKeywords = [
             'document', 'file', 'context', 'content', 'information', 'data',
             'extract', 'summarize', 'explain', 'reference', 'from the document', 'from the file', 'according to', 'based on', 'in the document', 'in the file'
@@ -303,14 +363,12 @@ app.post("/generate", async (req, res) => {
         const promptLower = prompt.toLowerCase();
         const shouldUseFileContext = Boolean(forceContext) || contextKeywords.some(word => promptLower.includes(word));
 
-        // Build enhanced prompt for Google
         let enhancedPrompt = prompt;
         if (shouldUseFileContext && fileContext) {
             enhancedPrompt = `Context from uploaded documents:\n${fileContext.substring(0, 12000)}\n\n` +
                 `Based on the above context, please respond to: ${prompt}`;
         }
 
-        // Add personality instructions to the prompt for Google
         if (personality) {
             let personalityPrompt = "\n\nPlease respond with the following personality characteristics:\n";
             const { context, traits, preferences, style, topics } = personality;
@@ -323,41 +381,61 @@ app.post("/generate", async (req, res) => {
         }
 
         let responseText = "No response";
-        switch ((provider || "google").toLowerCase()) {
-            case "openai": {
-                if (OPENAI_KEYS.length === 0) {
-                    return res.status(500).json({ error: "No OpenAI API keys configured" });
-                }
-                let systemPrompt = "You are an AI assistant.";
-                if (shouldUseFileContext && fileContext) {
-                    systemPrompt += `\n\nYou have access to the following document content for reference:\n${fileContext.substring(0, 12000)}...`;
-                }
-                if (personality) {
-                    const { context, traits, preferences, style, topics } = personality;
-                    if (context) systemPrompt += `\n\nContext: ${context}`;
-                    if (traits) systemPrompt += `\n\nTraits: ${traits}`;
-                    if (preferences) systemPrompt += `\n\nPreferences: ${preferences}`;
-                    if (style) systemPrompt += `\n\nStyle: ${style}`;
-                    if (topics) systemPrompt += `\n\nTopics: ${topics}`;
-                }
-                const openai = new OpenAI({ apiKey: getRandomOpenAIKey() });
-                const completion = await openai.chat.completions.create({
-                    model: "gpt-3.5-turbo",
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: prompt }
-                    ],
-                });
-                responseText = completion.choices[0]?.message?.content || "No response";
-                break;
+        let usedProvider = (provider || "google").toLowerCase();
+        let errorDetails = null;
+
+        async function tryOpenAI() {
+            if (OPENAI_KEYS.length === 0) {
+                throw new Error("No OpenAI API keys configured");
             }
-            case "google":
-            default: {
+            let systemPrompt = "You are an AI assistant.";
+            if (shouldUseFileContext && fileContext) {
+                systemPrompt += `\n\nYou have access to the following document content for reference:\n${fileContext.substring(0, 12000)}...`;
+            }
+            if (personality) {
+                const { context, traits, preferences, style, topics } = personality;
+                if (context) systemPrompt += `\n\nContext: ${context}`;
+                if (traits) systemPrompt += `\n\nTraits: ${traits}`;
+                if (preferences) systemPrompt += `\n\nPreferences: ${preferences}`;
+                if (style) systemPrompt += `\n\nStyle: ${style}`;
+                if (topics) systemPrompt += `\n\nTopics: ${topics}`;
+            }
+            const openai = new OpenAI({ apiKey: getRandomOpenAIKey() });
+            const completion = await openai.chat.completions.create({
+                model: "gpt-3.5-turbo",
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: prompt }
+                ],
+            });
+            return completion.choices[0]?.message?.content || "No response";
+        }
+
+        if (usedProvider === "google") {
+            try {
                 const result = await model.generateContent(enhancedPrompt);
                 responseText = result.response?.text() || "No response";
-                break;
+            } catch (error) {
+                // If Google quota exceeded, fallback to OpenAI if available
+                if (error.status === 429 && OPENAI_KEYS.length > 0) {
+                    try {
+                        responseText = await tryOpenAI();
+                        usedProvider = "openai";
+                    } catch (openaiError) {
+                        errorDetails = openaiError.message || openaiError.toString();
+                    }
+                } else {
+                    errorDetails = error.message || error.toString();
+                }
+            }
+        } else if (usedProvider === "openai") {
+            try {
+                responseText = await tryOpenAI();
+            } catch (openaiError) {
+                errorDetails = openaiError.message || openaiError.toString();
             }
         }
+
         // Apply personality formatting if specified
         if (personality && personality.responseFormats) {
             if (personality.responseFormats.code) {
@@ -367,7 +445,11 @@ app.post("/generate", async (req, res) => {
                 responseText = `***${responseText}***`;
             }
         }
-        res.json({ response: responseText });
+
+        if (errorDetails) {
+            return res.status(429).json({ error: errorDetails, providerTried: usedProvider });
+        }
+        res.json({ response: responseText, provider: usedProvider });
     } catch (error) {
         console.error("Error generating content:", error);
         res.status(500).json({ error: error.message || "Internal Server Error" });
@@ -447,6 +529,7 @@ app.get("/status", (req, res) => {
         supportedFormats: Object.keys(SUPPORTED_EXTENSIONS),
         availableParsers: {
             pdfParse: !!pdfParse,
+            pdfPoppler: !!pdfPoppler,
             mammoth: !!mammoth
         },
         timestamp: new Date().toISOString()
@@ -468,6 +551,7 @@ app.get("/", (req, res) => {
         fileContextLoaded: fileContext.length > 0,
         availableParsers: {
             pdfParse: !!pdfParse,
+            pdfPoppler: !!pdfPoppler,
             mammoth: !!mammoth
         }
     });
