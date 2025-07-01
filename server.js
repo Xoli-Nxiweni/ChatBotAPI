@@ -9,18 +9,10 @@ import path from "path";
 import { fileURLToPath } from 'url';
 
 // Import file parsing libraries with proper error handling
-let pdfPoppler;
 let mammoth; // For DOCX files
-let pdfParse; // Alternative PDF parser
+let pdfParse; // PDF parser - Linux compatible
 
-// Try to load PDF parsing libraries
-try {
-    pdfPoppler = (await import("pdf-poppler")).default;
-    console.log("✓ pdf-poppler loaded successfully");
-} catch (error) {
-    console.log("⚠️ pdf-poppler not available:", error.message);
-}
-
+// Try to load PDF parsing library (pdf-parse only - Linux compatible)
 try {
     pdfParse = (await import("pdf-parse")).default;
     console.log("✓ pdf-parse loaded successfully");
@@ -28,6 +20,7 @@ try {
     console.log("⚠️ pdf-parse not available:", error.message);
 }
 
+// Try to load mammoth for DOCX files
 try {
     mammoth = (await import("mammoth")).default;
     console.log("✓ mammoth (DOCX parser) loaded successfully");
@@ -95,83 +88,30 @@ const SUPPORTED_EXTENSIONS = {
     '.ppt': 'parsePPT'
 };
 
-// Enhanced PDF parsing with multiple fallback methods
+// Enhanced PDF parsing using only pdf-parse (Linux compatible)
 async function parsePDF(filePath) {
     console.log(`Attempting to parse PDF: ${filePath}`);
     
-    // Method 1: Try pdf-parse first (usually more reliable)
-    if (pdfParse) {
-        try {
-            console.log("Trying pdf-parse...");
-            const dataBuffer = fs.readFileSync(filePath);
-            const data = await pdfParse(dataBuffer);
-            if (data.text && data.text.trim().length > 0) {
-                console.log(`✓ pdf-parse successful: ${data.text.length} characters`);
-                return { text: data.text.trim(), method: 'pdf-parse' };
-            }
-        } catch (error) {
-            console.log(`pdf-parse failed: ${error.message}`);
-        }
+    if (!pdfParse) {
+        throw new Error("PDF parsing not available - pdf-parse library not loaded");
     }
     
-    // Method 2: Try pdf-poppler as fallback
-    if (pdfPoppler) {
-        try {
-            console.log("Trying pdf-poppler...");
-            const outputDir = path.join(path.dirname(filePath), 'temp_pdf_output');
-            
-            // Create temp directory if it doesn't exist
-            if (!fs.existsSync(outputDir)) {
-                fs.mkdirSync(outputDir, { recursive: true });
-            }
-            
-            const options = {
-                format: 'text',
-                out_dir: outputDir,
-                out_prefix: 'converted',
-                page: null
-            };
-            
-            await pdfPoppler.convert(filePath, options);
-            
-            let combinedText = '';
-            const files = fs.readdirSync(outputDir);
-            const textFiles = files.filter(file => file.startsWith('converted-') && file.endsWith('.txt'))
-                                   .sort((a, b) => {
-                                       const numA = parseInt(a.match(/converted-(\d+)\.txt/)?.[1] || '0');
-                                       const numB = parseInt(b.match(/converted-(\d+)\.txt/)?.[1] || '0');
-                                       return numA - numB;
-                                   });
-            
-            for (const textFile of textFiles) {
-                const textFilePath = path.join(outputDir, textFile);
-                if (fs.existsSync(textFilePath)) {
-                    const pageText = fs.readFileSync(textFilePath, 'utf8');
-                    combinedText += pageText + '\n\n';
-                }
-            }
-            
-            // Clean up temporary files
-            try {
-                for (const file of files) {
-                    fs.unlinkSync(path.join(outputDir, file));
-                }
-                fs.rmdirSync(outputDir);
-            } catch (cleanupError) {
-                console.warn("Warning: Could not clean up temporary files:", cleanupError.message);
-            }
-            
-            if (combinedText.trim().length > 0) {
-                console.log(`✓ pdf-poppler successful: ${combinedText.length} characters`);
-                return { text: combinedText.trim(), method: 'pdf-poppler' };
-            }
-            
-        } catch (error) {
-            console.log(`pdf-poppler failed: ${error.message}`);
+    try {
+        console.log("Parsing PDF with pdf-parse...");
+        const dataBuffer = fs.readFileSync(filePath);
+        const data = await pdfParse(dataBuffer);
+        
+        if (data.text && data.text.trim().length > 0) {
+            console.log(`✓ PDF parsed successfully: ${data.text.length} characters`);
+            return { text: data.text.trim(), method: 'pdf-parse' };
+        } else {
+            throw new Error("No text content found in PDF - file might be image-based or corrupted");
         }
+        
+    } catch (error) {
+        console.error(`PDF parsing error: ${error.message}`);
+        throw new Error(`PDF parsing failed: ${error.message}`);
     }
-    
-    throw new Error("All PDF parsing methods failed - file might be image-based, encrypted, or corrupted");
 }
 
 // Parse DOCX files using mammoth
@@ -193,7 +133,6 @@ async function parseDOCX(filePath) {
 
 // Parse DOC files (older format) - basic text extraction
 async function parseDOC(filePath) {
-    // DOC files are more complex, for now we'll treat them as binary and extract what we can
     try {
         console.log(`Attempting to parse DOC: ${filePath}`);
         const buffer = fs.readFileSync(filePath);
@@ -225,7 +164,7 @@ async function parseTXT(filePath) {
     }
 }
 
-// Parse PowerPoint files (basic - would need additional libraries for full support)
+// Parse PowerPoint files (placeholder - would need additional libraries for full support)
 async function parsePPTX(filePath) {
     console.log(`⚠️ PPTX parsing not fully implemented yet: ${filePath}`);
     return { text: `[PowerPoint file detected: ${path.basename(filePath)} - content extraction not yet implemented]`, method: 'placeholder' };
@@ -508,7 +447,6 @@ app.get("/status", (req, res) => {
         supportedFormats: Object.keys(SUPPORTED_EXTENSIONS),
         availableParsers: {
             pdfParse: !!pdfParse,
-            pdfPoppler: !!pdfPoppler,
             mammoth: !!mammoth
         },
         timestamp: new Date().toISOString()
@@ -530,7 +468,6 @@ app.get("/", (req, res) => {
         fileContextLoaded: fileContext.length > 0,
         availableParsers: {
             pdfParse: !!pdfParse,
-            pdfPoppler: !!pdfPoppler,
             mammoth: !!mammoth
         }
     });
